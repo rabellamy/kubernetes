@@ -102,6 +102,18 @@ const ServiceAnnotationLoadBalancerType = "service.beta.kubernetes.io/aws-load-b
 // to indicate that we want an internal ELB.
 const ServiceAnnotationLoadBalancerInternal = "service.beta.kubernetes.io/aws-load-balancer-internal"
 
+// MLS load balancer name annotation
+const ServiceAnnotationLoadBalancerName = "service.beta.kubernetes.io/aws-load-balancer-name"
+
+// MLS ELB protocol annotation
+const ServiceAnnotationLoadBalancerListenerProtocol = "service.beta.kubernetes.io/aws-load-balancer-protocol"
+
+// MLS port annotation
+const ServiceAnnotationLoadBalancerPort = "service.beta.kubernetes.io/aws-load-balancer-port"
+
+// MLS ssl cert ARN annotation
+const ServiceAnnotationLoadBalancerSSLCertificate = "service.beta.kubernetes.io/aws-load-balancer-ssl-certificate"
+
 // ServiceAnnotationLoadBalancerProxyProtocol is the annotation used on the
 // service to enable the proxy protocol on an ELB. Right now we only accept the
 // value "*" which means enable the proxy protocol on all ELB backends. In the
@@ -3218,8 +3230,14 @@ func buildListener(port v1.ServicePort, annotations map[string]string, sslPorts 
 	listener.InstancePort = &instancePort
 	listener.LoadBalancerPort = &loadBalancerPort
 	certID := annotations[ServiceAnnotationLoadBalancerCertificate]
+	if certID == "" {
+		certID = annotations[ServiceAnnotationLoadBalancerSSLCertificate]
+	}
 	if certID != "" && (sslPorts == nil || sslPorts.numbers.Has(loadBalancerPort) || sslPorts.names.Has(portName)) {
 		instanceProtocol = annotations[ServiceAnnotationLoadBalancerBEProtocol]
+		if instanceProtocol == "" {
+			instanceProtocol = annotations[ServiceAnnotationLoadBalancerListenerProtocol]
+		}
 		if instanceProtocol == "" {
 			protocol = "ssl"
 			instanceProtocol = "tcp"
@@ -3260,7 +3278,12 @@ func (c *Cloud) EnsureLoadBalancer(ctx context.Context, clusterName string, apiS
 	listeners := []*elb.Listener{}
 	v2Mappings := []nlbPortMapping{}
 
-	portList := getPortSets(annotations[ServiceAnnotationLoadBalancerSSLPorts])
+	sslPorts := annotations[ServiceAnnotationLoadBalancerSSLPorts]
+	if sslPorts == "" {
+		sslPorts = annotations[ServiceAnnotationLoadBalancerPort]
+	}
+	portList := getPortSets(sslPorts)
+
 	for _, port := range apiService.Spec.Ports {
 		if port.Protocol != v1.ProtocolTCP {
 			return nil, fmt.Errorf("Only TCP LoadBalancer is supported for AWS ELB")
@@ -3491,7 +3514,15 @@ func (c *Cloud) EnsureLoadBalancer(ctx context.Context, clusterName string, apiS
 		return nil, fmt.Errorf("could not find any suitable subnets for creating the ELB")
 	}
 
-	loadBalancerName := cloudprovider.GetLoadBalancerName(apiService)
+	loadBalancerName := annotations[ServiceAnnotationLoadBalancerName]
+	if loadBalancerName != "" {
+		loadBalancerName = strings.Replace(loadBalancerName, "-", "", -1)
+		if len(loadBalancerName) > 32 {
+			return nil, fmt.Errorf("annotation %q=%q detected, but AWS only allows load balancer names up to 32 bytes", ServiceAnnotationLoadBalancerName, loadBalancerName)
+		}
+	} else {
+		loadBalancerName = cloudprovider.GetLoadBalancerName(apiService)
+	}
 	serviceName := types.NamespacedName{Namespace: apiService.Namespace, Name: apiService.Name}
 	securityGroupIDs, err := c.buildELBSecurityGroupList(serviceName, loadBalancerName, annotations)
 	if err != nil {
